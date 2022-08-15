@@ -175,12 +175,12 @@ class _ZeroPadding(Packet):
         return b"", p
 
 
-class VarlenValue(_ZeroPadding):
-    name = "Bind Value"
+class SignedIntStrPair(_ZeroPadding):
+    name = "Bytes data"
     fields_desc = [
         FieldLenField("len", 0, fmt="i", length_of="value"),
         StrLenField(
-            "value", None, length_from=lambda pkt: pkt.len if pkt.len > 0 else 0
+            "data", None, length_from=lambda pkt: pkt.len if pkt.len > 0 else 0
         ),
     ]
 
@@ -298,14 +298,6 @@ class RowDescription(_ZeroPadding):
     ]
 
 
-class SignedIntStrPair(_ZeroPadding):
-    name = "Bytes data"
-    fields_desc = [
-        FieldLenField("len", None, length_of="data", fmt="I"),
-        StrLenField("data", None, length_from=lambda pkt: pkt.len),
-    ]
-
-
 class DataRow(_ZeroPadding):
     name = "Data Row"
     fields_desc = [
@@ -317,7 +309,7 @@ class DataRow(_ZeroPadding):
         PacketListField(
             "data",
             [],
-            VarlenValue,
+            SignedIntStrPair,
             count_from=lambda pkt: pkt.numfields,
         ),
     ]
@@ -403,7 +395,7 @@ class Bind(_ZeroPadding):
         ),
         FieldLenField("values_count", 0, fmt="H", count_of="values"),
         PacketListField(
-            "values", [], VarlenValue, count_from=lambda pkt: pkt.values_count
+            "values", [], SignedIntStrPair, count_from=lambda pkt: pkt.values_count
         ),
         FieldLenField("results_count", 0, fmt="H", count_of="results"),
         FieldListField(
