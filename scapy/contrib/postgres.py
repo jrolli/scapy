@@ -26,6 +26,7 @@ from scapy.fields import (
 )
 from scapy.packet import Packet, bind_layers
 from scapy.layers.inet import TCP
+from scapy.sessions import TCPSession
 
 AUTH_CODES = {
     0: "AuthenticationOk",
@@ -156,7 +157,7 @@ class ByteTagField(ByteField):
         return ord(self.default)
 
 
-class _BasePostgres(Packet):
+class _BasePostgres(Packet, TCPSession):
     name = "Regular packet"
     fields_desc = [
         PacketListField("contents", [], next_cls_cb=determine_pg_field)
@@ -177,6 +178,14 @@ class _BasePostgres(Packet):
 class _ZeroPadding(Packet):
     def extract_padding(self, p):
         return b"", p
+
+
+class VarlenValue(_ZeroPadding):
+    name = "Bind Value"
+    fields_desc = [
+        FieldLenField("len", 0, fmt="i", length_of="value"),
+        StrLenField("value", None, length_from=lambda pkt: pkt.len if pkt.len > 0 else 0)
+    ]
 
 
 class Authentication(_ZeroPadding):
@@ -308,15 +317,14 @@ class DataRow(_ZeroPadding):
     fields_desc = [
         ByteTagField(b"D"),
         FieldLenField(
-            "len", None, fmt="I", length_of="data", adjust=lambda pkt, x: x + 6
+            "len", None, fmt="I", length_of="data", adjust=lambda pkt, x: len(pkt) - 1
         ),
-        SignedShortField("numfields", 0),
+        FieldLenField("numfields", 0),
         PacketListField(
             "data",
             [],
-            pkt_cls=SignedIntStrPair,
+            VarlenValue,
             count_from=lambda pkt: pkt.numfields,
-            length_from=lambda pkt: pkt.len - 6,
         ),
     ]
 
@@ -377,6 +385,30 @@ class Terminate(_ZeroPadding):
         SignedIntField("len", 4),
     ]
 
+
+class _Todo(_ZeroPadding):
+    name = "Unsupported message"
+    fields_desc = [
+        ByteTagField(b"?"),
+        FieldLenField("len", None, fmt="I", length_of="body"),
+        StrLenField("body", None, length_from=lambda pkt: pkt.len - 4),
+    ]
+
+
+class Bind(_ZeroPadding):
+    name = "Bind Request"
+    fields_desc = [
+        ByteTagField(b"?"),
+        FieldLenField("len", None, fmt="I", length_of="body", adjust=lambda pkt, x: len(pkt) - 1),
+        StrNullField("destination", ""),
+        StrNullField("statement", ""),
+        FieldLenField("codes_count", 0, fmt="H", count_of="codes"),
+        FieldListField("codes", [], ShortField("", 0), count_from=lambda pkt: pkt.codes_count),
+        FieldLenField("values_count", 0, fmt="H", count_of="values"),
+        PacketListField("values", [], VarlenValue, count_from=lambda pkt: pkt.values_count),
+        FieldLenField("results_count", 0, fmt="H", count_of="results"),
+        FieldListField("results", [], ShortField("", 0), count_from=lambda pkt: pkt.results_count),
+    ]
 
 class BindComplete(_ZeroPadding):
     name = "Bind Complete"
@@ -478,13 +510,7 @@ class Parse(_ZeroPadding):
     name = "Parse Request"
     fields_desc = [
         ByteTagField(b"P"),
-        _FieldsLenField(
-            "len",
-            None,
-            fmt="I",
-            length_of=("destination", "query", "params"),
-            adjust=lambda pkt, x: x + 8,
-        ),
+        FieldLenField("len", None, fmt="I", adjust=lambda pkt, x: len(pkt)-1),
         StrNullField("destination", ""),
         StrNullField("query", ""),
         FieldLenField("num_param_dtypes", None, fmt="H", count_of="params"),
@@ -492,7 +518,7 @@ class Parse(_ZeroPadding):
             "params",
             [],
             SignedIntField("param", None),
-            count_from="num_param_dtypes",
+            count_from=lambda pkt: pkt.num_param_dtypes,
         ),
     ]
 
@@ -717,7 +743,7 @@ class CopyBothResponse(_ZeroPadding):
 
 
 FRONTEND_TAG_TO_PACKET_CLS = {
-    # b'B' : 'Bind',  # TODO
+    b'B': Bind,
     b"C": Close,
     b"d": CopyData,
     b"c": CopyDone,
@@ -725,7 +751,7 @@ FRONTEND_TAG_TO_PACKET_CLS = {
     b"D": Describe,
     b"E": Execute,
     b"H": Flush,
-    # b'F': 'FunctionCall',  # TODO
+    b'F': _Todo,
     b"P": Parse,
     b"p": PasswordMessage,
     b"Q": Query,
@@ -764,9 +790,20 @@ BACKEND_TAG_TO_PACKET_CLS = {
 class PostgresFrontend(_BasePostgres):
     cls_mapping = FRONTEND_TAG_TO_PACKET_CLS
 
+    @classmethod
+    def tcp_reassemble(cls, data, metadata):
+        msgs = PostgresFrontend(data)
+        if len(msgs.contents) > 0 and 'Sync' in msgs.contents[-1]:
+            return msgs
 
 class PostgresBackend(_BasePostgres):
     cls_mapping = BACKEND_TAG_TO_PACKET_CLS
+
+    @classmethod
+    def tcp_reassemble(cls, data, metadata):
+        msgs = PostgresBackend(data)
+        if len(msgs.contents) > 0 and 'ReadyForQuery' in msgs.contents[-1]:
+            return msgs
 
 
 bind_layers(TCP, PostgresFrontend, dport=5432)
